@@ -123,21 +123,46 @@ function MSEPlayer({
   }, []);
 
   const onConnect = useCallback(() => {
-    if (!videoRef.current?.isConnected || !wsURL || wsRef.current) return false;
+    if (
+      !videoRef.current?.isConnected ||
+      !wsURL ||
+      wsRef.current ||
+      wsState === WebSocket.CONNECTING
+    )
+      return false;
+
+    // Clear any pending reconnection attempts
+    if (reconnectTIDRef.current) {
+      clearTimeout(reconnectTIDRef.current);
+      reconnectTIDRef.current = null;
+    }
 
     setWsState(WebSocket.CONNECTING);
-
     setConnectTS(Date.now());
 
-    wsRef.current = new WebSocket(wsURL);
-    wsRef.current.binaryType = "arraybuffer";
-    wsRef.current.addEventListener("open", onOpen);
-    wsRef.current.addEventListener("close", onClose);
+    try {
+      wsRef.current = new WebSocket(wsURL);
+      wsRef.current.binaryType = "arraybuffer";
+      wsRef.current.addEventListener("open", onOpen);
+      wsRef.current.addEventListener("close", onClose);
+    } catch (error) {
+      // Handle WebSocket creation errors
+      setWsState(WebSocket.CLOSED);
+      wsRef.current = null;
+      return false;
+    }
+
     // we know that these deps are correct
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [wsURL]);
+  }, [wsURL, wsState]);
 
   const onDisconnect = useCallback(() => {
+    // Clear any pending reconnection attempts
+    if (reconnectTIDRef.current) {
+      clearTimeout(reconnectTIDRef.current);
+      reconnectTIDRef.current = null;
+    }
+
     if (bufferTimeout) {
       clearTimeout(bufferTimeout);
       setBufferTimeout(undefined);
@@ -147,9 +172,14 @@ function MSEPlayer({
 
     if (wsRef.current) {
       setWsState(WebSocket.CLOSED);
+      // Remove event listeners before closing to prevent unwanted callbacks
+      wsRef.current.removeEventListener("open", onOpen);
+      wsRef.current.removeEventListener("close", onClose);
       wsRef.current.close();
       wsRef.current = null;
     }
+    // onOpen and onClose are plain functions that don't change, safe to omit from deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [bufferTimeout]);
 
   const handlePause = useCallback(() => {
@@ -180,8 +210,25 @@ function MSEPlayer({
   };
 
   const reconnect = (timeout?: number) => {
+    // Prevent reconnection if already connecting or if component is disconnected
+    if (wsState === WebSocket.CONNECTING || !videoRef.current?.isConnected)
+      return;
+
+    // Clear any existing reconnection attempts
+    if (reconnectTIDRef.current) {
+      clearTimeout(reconnectTIDRef.current);
+      reconnectTIDRef.current = null;
+    }
+
+    // Clean up existing connection
+    if (wsRef.current) {
+      wsRef.current.removeEventListener("open", onOpen);
+      wsRef.current.removeEventListener("close", onClose);
+      wsRef.current.close();
+      wsRef.current = null;
+    }
+
     setWsState(WebSocket.CONNECTING);
-    wsRef.current = null;
 
     const delay =
       timeout ?? Math.max(RECONNECT_TIMEOUT - (Date.now() - connectTS), 0);
@@ -193,7 +240,16 @@ function MSEPlayer({
   };
 
   const onClose = () => {
-    if (wsState === WebSocket.CLOSED) return;
+    // Only attempt reconnection if we're not already closed or trying to reconnect
+    if (wsState === WebSocket.CLOSED || wsState === WebSocket.CONNECTING)
+      return;
+
+    // Don't reconnect if the component is not connected to DOM
+    if (!videoRef.current?.isConnected) {
+      setWsState(WebSocket.CLOSED);
+      return;
+    }
+
     reconnect();
   };
 
